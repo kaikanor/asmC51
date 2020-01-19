@@ -1,0 +1,553 @@
+﻿key0 EQU 11000000b
+key1 EQU 11111001b
+key2 EQU 10100110b
+key3 EQU 10110000b
+key4 EQU 10011001b
+key5 EQU 10010110b
+key6 EQU 10000010b
+key7 EQU 11111000b
+key8 EQU 10000000b
+key9 EQU 10010000b
+keya EQU 10001000b
+keyb EQU 10000011b
+keyc EQU 11000110b
+keyd EQU 10100001b
+keyv EQU 11000001b
+keys EQU 11010010b
+keye EQU 10000100b
+M EQU 12
+public indicator
+public digit
+
+err macro num
+	mov indicator1, #keye
+	mov indicator2, #num
+	call indicator
+endm
+
+
+read_from_adc macro
+	mov a, #0
+	clr p1.5
+	nop
+	setb p1.5
+	nop
+	clr p1.4
+	nop
+	nop
+	nop
+	mov R7, #12
+	opros:
+	clr p1.7
+	nop
+	nop
+	setb p1.7
+	mov c, p1.6
+	rlc a	
+	djnz R7, opros
+	mov R7, a	
+	mov p1, #0FFh
+endm
+
+macro_for_kb macro
+nop
+mov a, p1
+cpl a
+jnz key_ok
+endm
+
+dseg at 30h
+indicator1: ds 1 ; символы на 
+indicator2: ds 1 ; вывод индикатору
+digit1: ds 1 ; первая текущая цифра
+digit2: ds 1 ; вторая текущая цифра
+flag_for_y3: ds 1 ; флаг для десятичной точки индикатора
+flag_for_y1: ds 1 ; флаг для строба У1
+q1: ds 1  ; первая цифра Q 
+q2: ds 1  ; вторая цифра Q 
+qvalue: ds 1 ; само значение Q
+pointer_buff: ds 2 ; ссылка на кольц. буфер для записи в ОЗУ
+pointer_uart: ds 2 ; ссылка на ОЗУ для вывода в уарт 
+uart_counter: ds 1 ; счётчик для значений уарта
+actual_x5: ds 1
+flag_for_pwg: ds 1 ; флаг для ГПС (У3)
+array_x5: ds 8
+counter_timer0: ds 1 ; счётчик для таймера0
+xseg
+ram: ds 1
+
+cseg
+jmp start
+org 000Bh
+jmp timer0
+org 0023h
+jmp uart
+org 001Bh
+jmp timer1
+org 0003h
+jmp prer
+org 002Bh
+jmp timer2
+org 0030h
+ind: db 11000000b, 11111001b, 10100110b, 10110000b, 10011001b, 10010110b, 10000010b, 11111000b, 10000000b, 10010000b, 10001000b, 10000011b, 11000110b, 10100001b, 11000001b, 11010010b, 10000100b
+
+prer:
+; сначала опросим клавиатуру
+clr ex0 ;отключить прерывание от клавиатуры
+; тут тело опроса
+mov p2, #11100000b
+macro_for_kb
+mov p2, #11010000b
+macro_for_kb
+mov p2, #10110000b
+macro_for_kb
+mov p2, #01110000b
+macro_for_kb
+; ничего не нажато
+setb ex0 ;включить прерывание от клавиатуры
+jmp the_end_prer
+key_ok:  ; нашли клавишу
+mov b, p2 ; теперь в b - столбцы, а в a - строки
+mov R3, #0FFh ; в R3 будет нажатая клавиша
+swap a
+stroka:
+inc R3
+clr c
+rlc a
+jnz stroka
+mov a, b
+cpl a
+swap a
+dec R3
+dec R3
+dec R3
+dec R3
+stolbec:
+inc R3
+inc R3
+inc R3
+inc R3
+clr c
+rlc a
+jnz stolbec
+; теперь в R3 номер нажатой клавишы
+for_digit:
+mov a, R3
+clr c
+subb a, #10
+jc not_digit
+call digit
+not_digit: 
+mov a, R3
+cjne a, #0ah, not_a
+for_a:
+; тут инициализация уарта и выход
+mov pointer_uart, pointer_buff
+mov pointer_uart+1, pointer_buff+1
+mov uart_counter, #32 ; 16 чисел по 2 байта = 32
+setb ti
+jmp the_end_prer
+not_a: 
+cjne a, #0bh, not_b
+for_b:
+; тут клавиша В
+mov a, flag_for_pwg
+jnz pwg_ok
+mov flag_for_pwg, #1
+setb tf1 ; вызываем таймер1
+jmp the_end_prer
+pwg_ok:
+err key2
+jmp the_end_prer
+not_b: 
+cjne a, #0ch, not_c
+for_c:
+; тут клавиша C
+mov a, flag_for_pwg
+jz pwg_nok
+mov flag_for_pwg, #0
+jmp the_end_prer
+pwg_nok:
+err key3
+jmp the_end_prer
+not_c: 
+cjne a, #0dh, not_d
+for_d:
+; тут клавиша D
+; вычислить среднее из последних 8-ми Х5
+mov a, #0
+mov b, #0
+mov R2, #8
+mov R0, #array_x5
+mean:
+inc R0
+clr c
+add a, @R0
+jnc not_ovf_mean
+inc b
+not_ovf_mean:
+djnz R2, mean
+; теперь три раза сдвигаем вправо
+mov R2, #3
+sdvig_na_3_0:
+xch a, R0
+mov a, b
+clr c
+rrc a
+mov b, a
+xch a, R0
+rrc a
+djnz R2, sdvig_na_3_0
+; помещаем полученное число на место вывода
+; для этого переводим его в десятичное
+mov R2, a
+mov a, #0
+perevod:
+inc a
+da a
+djnz R2, perevod
+mov R2, a ; в R2 теперь эти цифры
+clr c
+rrc a
+clr c
+rrc a
+clr c
+rrc a
+clr c
+rrc a
+; получили первую цифру в а
+add a, #ind
+mov dptr, #0
+movc a, @a+dptr
+mov indicator1, a ; записали первую цифру
+mov a, R2
+swap a
+clr c
+rrc a
+clr c
+rrc a
+clr c
+rrc a
+clr c
+rrc a
+; получили вторую цифру в а
+add a, #ind
+mov dptr, #0
+movc a, @a+dptr
+mov indicator2, a ; записали вторую цифру
+; далее запускаем таймер0 на 2-3 секунды
+; таймер при максимуме может работать 65мкс
+; тогда запускаем на максимум 40 раз
+mov counter_timer0, #40
+clr tf0
+mov tl0, #0
+mov th0, #0
+setb tr0
+jmp the_end_prer
+not_d: 
+cjne a, #0fh, not_s
+for_s:
+; тут клавиша СБРОС
+mov q1, #0FFh
+mov q2, #0FFh
+mov qvalue, #0
+mov indicator1, #0FFh
+mov indicator2, #0FFh
+jmp the_end_prer
+not_s: 
+mov a, digit2
+cjne a, #0FFh, contine_digit_2_0 ; проверяем вторую цифру на наличие
+;Обработка ВВОДА
+for_v:
+mov q2, digit2
+mov q1, digit1
+;перевести q1 q2 в qvalue
+mov a, q1
+mov r2, q2
+qvalue_perevod:
+add a, #0ah
+djnz r2, qvalue_perevod
+mov qvalue, a
+clr p3.4
+mov flag_for_y1, #1
+mov indicator1, #0FFh
+mov indicator2, #0FFh
+; запустить таймер на 12мс
+; значит 12000 тиков
+; значит 53535 в счётчик
+clr tf2
+mov tl2, #1Fh
+mov th2, #0D1h
+setb tr2
+jmp the_end_prer
+contine_digit_2_0:
+err key4
+jmp the_end_prer
+the_end_prer:
+setb ex0 ;включить прерывание от клавиатуры
+setb WDTRST  ; перезагрузка Watchdog
+reti	
+
+
+uart:
+mov a, uart_counter
+clr c 
+dec a
+jc the_end_uart
+mov uart_counter, a
+;вывести значение в уарт
+clr ti
+mov dph, pointer_uart
+mov dpl, pointer_uart+1
+movx a, @dptr 
+mov sbuf, a
+mov a, dpl
+mov b, dph
+clr c
+dec a
+jnc not_min
+clr c
+dec b
+jnc not_end
+mov pointer_uart, #3
+mov pointer_uart+1, #0
+not_end:
+not_min:
+mov pointer_uart, R0
+the_end_uart:
+reti
+
+
+
+timer0:
+clr tf0 
+clr c
+dec counter_timer0
+jc the_end_timer0_0
+mov tl0, #0
+mov th0, #0
+setb tr0
+jmp the_end_timer0
+the_end_timer0_0:
+mov indicator1, #0FFh
+mov indicator2, #0FFh
+the_end_timer0:
+reti
+
+
+timer1:
+clr tf1
+mov a, flag_for_pwg
+jz the_end_timer1
+;посчитать tи
+mov a, #0
+mov b, #0
+mov R5, M
+mov R4, qvalue
+umnozh_na_12_2:
+clr c
+add a, R4
+jnc not_carry_2
+inc b
+not_carry_2:
+djnz R5, umnozh_na_12_2
+; M*X5 = b|a
+mov R5, #8
+sdvig:
+clr c
+xch a, R4 ; младший байт теперь в R4
+mov a, b
+rrc a
+mov b, a
+xch a, R4
+rrc a
+djnz R5, sdvig
+; M*X5/256 = b|a = tи
+mov R5, flag_for_y3
+dec R5
+jnc metka_for_flag_y3
+mov R5, a
+mov a, #24
+clr c
+subb a, R5
+metka_for_flag_y3:
+; теперь запускаем таймер 1 на R5 мс и проч.
+mov R5, a
+cpl p3.5
+mov a, flag_for_y3
+cpl acc.0
+mov flag_for_y3, a
+call indicator
+clr c
+mov a, #0FFh
+subb a, R5
+mov R5, a
+mov b, #0
+mov R4, #125
+umnozh_na_125:
+clr c
+add a, R5
+jnc not_carry_3
+inc b
+not_carry_3:
+djnz R4, umnozh_na_125
+mov R4, #3
+sdvig_na_3:
+clr c
+rlc a
+xch a, R5
+mov a, b
+rlc a
+mov b, a
+xch a, R5
+djnz R4, sdvig_na_3
+clr tf0
+mov tl0, a
+mov th0, b
+setb tr0
+the_end_timer1:
+reti
+
+timer2:
+clr tf2
+mov a, flag_for_y1
+clr c
+subb a, #1
+jc the_end_timer2
+setb p3.4
+mov flag_for_y1, #0
+the_end_timer2:
+reti
+
+indicator:
+mov a, flag_for_y3
+mov c, acc.0
+clr p3.0
+clr ex0 ;отключить прерывание от клавиатуры
+mov p0, indicator2
+mov p2, indicator1
+mov p0.7, c
+setb p3.0
+mov p2, #0h
+setb ex0 ;включить прерывание от клавиатуры
+ret
+
+digit:
+mov a, digit1
+cjne a, #0FFh, contine_digit_1 ; проверяем первую цифру на наличие
+mov digit1, R3
+jmp the_end_digit
+contine_digit_1:
+mov a, digit2
+cjne a, #0FFh, contine_digit_2 ; проверяем вторую цифру на наличие
+mov digit2, R3
+; записать текущее число на место вывода
+mov dptr, #0
+mov a, #ind
+clr c
+add a, digit1
+movc a, @a+dptr 
+mov indicator1, a
+; теперь записываем второе число
+mov dptr, #0
+mov a, #ind
+clr c
+add a, digit2
+movc a, @a+dptr 
+mov indicator2, a
+jmp the_end_digit
+contine_digit_2:
+err key1
+the_end_digit:
+ret
+
+
+start:
+mov flag_for_pwg, #0 ; изначально ГПС выключен
+mov digit1, #0FFh ; загружаем текущие
+mov digit2, #0FFh ; цифры для опознавания
+mov flag_for_pwg, #0 ; флаг для ГПС (У3)
+clr p2.7 ; включаем
+clr p2.6 ; для проверки
+clr p2.5 ; прерываний
+clr p2.4 ; от клавиатуры
+orl WCON,#01000001b ; запуск watchdog
+mov p1, #0FFh ; для клавиатуры и АЦП
+setb it0 ; установка прерывания инт0 по спаду
+setb ea  ; разрешение прерываний от всех источников
+mov TMOD, #11h ; установка таймеров в 16-разрядные режимы
+setb P3.4 ; устанавливаем У1 в 1
+setb SM0  ; установка режима уарт в 
+clr SM1   ; 8-разрядный уарт с частотой = (тактовая частота)/64
+mov qvalue, #M
+mov pointer_buff+1, #0FFh
+mov pointer_buff, #0FFh
+
+main_cycl:
+call indicator
+read_from_adc ;считывание данных с АЦП в R7
+mov actual_x5, R7
+mov a, qvalue
+clr c
+rlc a ; умножение Q на два
+add a, #M
+mov r0, a
+mov a, R7
+clr c
+subb a, r7
+mov p3.3, c ; зажигаем светодиоды
+mov R7, a
+; Теперь в а и R7 у нас X5, запишем его в массив
+; последних 8 чисел, сдвигая массивё
+mov array_x5+7, array_x5+6
+mov array_x5+6, array_x5+5
+mov array_x5+5, array_x5+4
+mov array_x5+4, array_x5+3
+mov array_x5+3, array_x5+2
+mov array_x5+2, array_x5+1
+mov array_x5+1, array_x5
+mov array_x5, R7
+mov R6, #12
+mov b, #0
+umnozh_na_12:
+clr c
+add a, R7
+jnc not_carry_1
+inc b
+not_carry_1:
+djnz R6, umnozh_na_12
+mov R7, a ; R7 = 12 * X5, b -- старший байт
+; далее пишем в ОЗУ
+mov a, pointer_buff+1
+clr c
+inc a
+jnc pbst
+inc pointer_buff
+mov a, pointer_buff
+subb a, #3
+jnc pbst_1
+mov pointer_buff, #0
+pbst_1:
+mov pointer_buff+1, #0
+pbst:
+mov pointer_buff+1, a
+jc buff_not_overflow
+mov a, #0h
+mov pointer_buff, a
+buff_not_overflow:
+mov dpl, pointer_buff+1
+mov dph, pointer_buff
+mov a, b
+movx @dptr, a ; записали старший байт
+inc pointer_buff+1
+mov dpl, pointer_buff+1
+mov dph, pointer_buff
+mov a, R7
+movx @dptr, a ; записали младший байт
+mov flag_for_y1, #0
+;   без прерываний всё это занимает ~ 203 мкс
+;   =>  если без таймера, то частота опроса АЦП составит 5к Гц
+;   а максимум частоты опроса = 600кГц, так что можно опрашивать 
+;   и без таймера
+jmp main_cycl
+end
